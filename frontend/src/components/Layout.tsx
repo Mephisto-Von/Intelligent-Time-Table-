@@ -17,8 +17,8 @@ const NAV: { section: string; items: NavEntry[] }[] = [
     items: [
       { to: '/', label: 'Dashboard', icon: '📊', end: true },
       { to: '/timetable', label: 'Timetable', icon: '🗓️' },
-      { to: '/cover', label: 'Cover & Substitutes', icon: '🔁' },
-      { to: '/leave', label: 'Leave', icon: '🌴' },
+      { to: '/cover', label: 'Cover & Substitutes', icon: '🔁', roles: ['admin', 'scheduler', 'teacher'] },
+      { to: '/leave', label: 'Leave', icon: '🌴', roles: ['admin', 'scheduler', 'teacher'] },
       { to: '/calendar', label: 'Calendar', icon: '📅' },
     ],
   },

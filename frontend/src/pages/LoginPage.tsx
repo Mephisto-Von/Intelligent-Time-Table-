@@ -151,7 +151,7 @@ export default function LoginPage() {
               />
             </Field>
 
-            <Btn variant="primary" block disabled={busy !== null}>
+            <Btn variant="primary" type="submit" block disabled={busy !== null}>
               {busy === 'submit' ? <Spinner /> : mode === 'login' ? 'Sign in' : 'Create school'}
             </Btn>
           </form>

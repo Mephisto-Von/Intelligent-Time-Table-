@@ -58,13 +58,19 @@ export default function DashboardPage() {
           <div className="grid cols-4">
             <Card className="stat">
               <div className="stat-label">Timetable coverage</div>
-              <div className="stat-value">{pct}%</div>
-              <div className="progress" style={{ margin: '6px 0' }}>
-                <div style={{ width: `${pct}%` }} />
-              </div>
-              <div className="stat-hint">
-                {data.placed} of {data.requested} weekly periods placed
-              </div>
+              <div className="stat-value">{data.requested > 0 ? `${pct}%` : '—'}</div>
+              {data.requested > 0 ? (
+                <>
+                  <div className="progress" style={{ margin: '6px 0' }}>
+                    <div style={{ width: `${pct}%` }} />
+                  </div>
+                  <div className="stat-hint">
+                    {data.placed} of {data.requested} weekly periods placed
+                  </div>
+                </>
+              ) : (
+                <div className="stat-hint">Add lessons to the curriculum to get started</div>
+              )}
             </Card>
             <Card className="stat">
               <div className="stat-label">Today&apos;s absences</div>
@@ -96,7 +102,22 @@ export default function DashboardPage() {
               title="Unplaced periods"
               actions={<Badge tone={data.gaps.length === 0 ? 'ok' : 'warn'}>{data.gaps.length}</Badge>}
             >
-              {data.gaps.length === 0 ? (
+              {data.requested === 0 ? (
+                <EmptyState
+                  icon="🧩"
+                  title="No curriculum yet"
+                  desc="Add subjects, classes, teachers and lessons in School setup, then generate the timetable."
+                  action={
+                    isStaff ? (
+                      <Link to="/setup">
+                        <Btn size="sm" variant="primary">
+                          Open School setup
+                        </Btn>
+                      </Link>
+                    ) : undefined
+                  }
+                />
+              ) : data.gaps.length === 0 ? (
                 <EmptyState
                   icon="✅"
                   title="Everything is placed"
