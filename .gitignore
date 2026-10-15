@@ -1,0 +1,22 @@
+# Rust
+backend/target/
+**/*.rs.bk
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Runtime data
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+
+# Env / secrets
+.env
+.env.local
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
