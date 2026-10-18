@@ -31,6 +31,10 @@ jobs:
         with:
           workspaces: backend
 
+      - name: Run backend unit tests
+        working-directory: backend
+        run: cargo test --locked
+
       - name: Install Node
         uses: actions/setup-node@v4
         with:
