@@ -14,16 +14,21 @@ SKIP_BROWSER=1 tests/run.sh  # HTTP suites only
 
 The runner:
 
-1. builds `backend` (cargo) and `frontend` (vite),
+1. builds `backend` (cargo) and `frontend` (vite), installing the frontend's
+   `node_modules` with `npm ci` first if they are missing (fresh clone / CI),
 2. starts `tests/webhook-receiver.mjs` on `:9098` and the backend on `:8126`
    (override with `PORT` / `WEBHOOK_PORT`) against a throwaway SQLite DB in
    `$TMPDIR/ttm-e2e.*`, seeded with the demo school (`--seed-demo`) and
    `NOTIFY_WEBHOOK_URL` pointed at the stub,
-3. runs the three HTTP suites, then the three browser suites (stopping at the
+3. refuses to start if anything already answers on `:8126` or `:9098` — a
+   leftover server from an earlier run would otherwise answer the readiness
+   probe and the suites would silently test that stale process,
+4. runs the three HTTP suites, then the three browser suites (stopping at the
    first failing suite — fix it and re-run, or run a single suite by hand as
-   described below),
-4. prints per-suite pass/fail and keeps logs (`backend.log`, `webhook.log`) in
-   the work dir it prints at the end.
+   described below). A failing suite prints every check it ran; a passing one
+   only prints its summary line,
+5. keeps logs (`backend.log`, `webhook.log`, one `<suite>.log` per HTTP suite)
+   in the work dir it prints at the end.
 
 To iterate on one suite while a server is already running:
 
@@ -53,6 +58,7 @@ both overridden).
 
 ## Requirements
 
-- Rust + cargo, Node + npm (backend and browser suites)
+- Rust + cargo, Node + npm (backend and browser suites; `run.sh` installs
+  packages itself when `node_modules` is absent)
 - Python 3 (stdlib only — no pip installs needed)
 - Playwright Chromium (auto-installed by `run.sh` into `tests/browser`)

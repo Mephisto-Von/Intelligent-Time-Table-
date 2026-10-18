@@ -53,10 +53,12 @@ await schoolCard.getByRole('button', { name: /Save school settings/ }).click()
 
 const auditCard = page.locator('.card', { hasText: 'Activity log' }).first()
 await auditCard.waitFor({ timeout: 10000 })
-const firstRow = auditCard.locator('table.tbl tbody tr').first()
-const logged = await firstRow.waitFor({ timeout: 10000 }).then(() => true).catch(() => false)
+// Earlier suites write audit rows too, and the list refetches after this save,
+// so wait for *this* save's row instead of reading whatever is currently first.
+const savedRow = auditCard.locator('table.tbl tbody tr', { hasText: 'Updated school settings' }).first()
+const logged = await savedRow.waitFor({ timeout: 15000 }).then(() => true).catch(() => false)
 check('saving school settings is written to the activity log', logged, await auditCard.innerText().catch(() => ''))
-const rowText = logged ? (await firstRow.innerText()).replace(/\s+/g, ' ') : ''
+const rowText = logged ? (await savedRow.innerText()).replace(/\s+/g, ' ') : ''
 const apiTop = await page.evaluate(async () => {
   const r = await fetch('/api/audit?limit=50', {
     headers: { Authorization: 'Bearer ' + localStorage.getItem('tt_token') },
@@ -91,11 +93,22 @@ const modal = page.locator('.modal')
 await modal.waitFor({ timeout: 10000 })
 check('the share dialog opens', (await modal.innerText()).includes('timetable'))
 
+// The dialog fetches existing links when it opens. Wait for that fetch to settle
+// before looking for the Create button: counting it immediately can see zero (the
+// "Loading links…" placeholder is still up) and then click nothing at all.
+await modal.getByText('Loading links…').waitFor({ state: 'hidden', timeout: 20000 }).catch(() => {})
 const createBtn = modal.getByRole('button', { name: /Create public link/ })
-if (await createBtn.count()) {
-  await createBtn.click()
+const linkActive = modal.getByText('Public link active')
+if (!(await linkActive.isVisible().catch(() => false))) {
+  const posted = page.waitForResponse(
+    (r) => r.url().includes('/api/public-links') && r.request().method() === 'POST',
+    { timeout: 20000 },
+  )
+  await createBtn.click({ timeout: 20000 })
+  const res = await posted
+  check('creating a link from the dialog succeeds', res.ok(), `${res.status()} ${await res.text().catch(() => '')}`)
 }
-await page.waitForSelector('text=Public link active', { timeout: 10000 })
+await linkActive.waitFor({ timeout: 20000 })
 check('the dialog shows the live link after creating one', (await modal.innerText()).includes('Public link active'))
 
 const countLinks = async () =>

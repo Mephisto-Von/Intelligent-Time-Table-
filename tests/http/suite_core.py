@@ -114,7 +114,6 @@ check("teacher role cannot place entries", teach.req(
     body={"lesson_id": e0["lesson_id"], "week": 0, "day": e0["day"], "idx": e0["idx"]},
 )[0] == 403)
 
-src = next(e for e in week0 if not e["locked"])
 learners = {e["class_id"] for e in week0}
 teach_busy = {}
 for e in week0:
@@ -124,21 +123,37 @@ for e in week0:
     class_busy.setdefault((e["class_id"], e["day"], e["idx"]), e)
 
 open_slots = [(x["day"], x["idx"]) for x in tt["slots"] if not x["is_break"]]
+
+# A lesson taught on every day of the cycle cannot move anywhere without breaking
+# the per-day subject cap, and the API's entry order is not guaranteed, so try
+# every unlocked lesson instead of assuming the first one is movable.
 moved = False
-moved_from = (src["day"], src["idx"])
+src = None
+moved_from = None
 target = None
-for day, idx in open_slots:
-    if (day, idx) == moved_from:
-        continue
-    if (src["class_id"], day, idx) in class_busy or (src["teacher_id"], day, idx) in teach_busy:
-        continue
-    s, resp, _ = admin.req("PUT", f"/api/timetable/entries/{src['id']}", body={"week": 0, "day": day, "idx": idx})
-    target = (day, idx)
-    if s == 200:
-        moved = True
+attempts = 0
+refusals = []
+for candidate in [e for e in week0 if not e["locked"]]:
+    from_slot = (candidate["day"], candidate["idx"])
+    for day, idx in open_slots:
+        if (day, idx) == from_slot:
+            continue
+        if (candidate["class_id"], day, idx) in class_busy or (candidate["teacher_id"], day, idx) in teach_busy:
+            continue
+        attempts += 1
+        s, resp, _ = admin.req("PUT", f"/api/timetable/entries/{candidate['id']}", body={"week": 0, "day": day, "idx": idx})
+        if s == 200:
+            src, moved, moved_from, target = candidate, True, from_slot, (day, idx)
+            break
+        refusals.append((s, resp.get("error") if isinstance(resp, dict) else resp))
+        if len(refusals) >= 12:
+            break
+    if moved or len(refusals) >= 12:
         break
-    last_err = (s, resp)
-check("moving a lesson to a free legal slot succeeds", moved, f"target={target} last={last_err if not moved else ''}")
+check("moving a lesson to a free legal slot succeeds", moved,
+      f"{attempts} attempt(s) over {len(week0)} entries; refusals={refusals[-3:]}")
+check("a refused move is a rule violation, not a server error",
+      all(s == 409 for s, _ in refusals), f"{refusals[:3]}")
 if moved:
     s, tt2, _ = admin.req("GET", "/api/timetable")
     new_row = next((e for e in tt2["entries"] if e["id"] == src["id"]), None)

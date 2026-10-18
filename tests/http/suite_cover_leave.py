@@ -74,7 +74,14 @@ s, cover_s, _ = sched.req("GET", f"/api/cover?date={monday}")
 check("scheduler (staff) can read the cover view", s == 200 and cover_s["date"] == monday, f"{s} {cover_s.get('date')}")
 check("student cannot read the cover view", stud.req("GET", "/api/cover")[0] == 403)
 
-p0 = periods[0]
+# Periods cover every absent teacher that day, and their order is not guaranteed,
+# so pick one of Priya's own periods — assigning her as substitute only proves a
+# rule about self-cover if the lesson really is hers.
+p0 = next((p for p in periods if p.get("absent_teacher_id") == priya_id), None)
+check("the cover view lists periods for the absent teacher", p0 is not None,
+      f"{len(periods)} periods; absent={sorted({p.get('absent_teacher_name') for p in periods})}")
+if p0 is None:
+    summary("suite_cover_leave")
 candidates = p0["candidates"]
 check("candidates are ranked and annotated", candidates and all("score" in c and "reason" in c for c in candidates), str(candidates[:2]))
 absent_ids = {a["teacher_id"] for a in cover["absences"]}
@@ -96,10 +103,11 @@ s, reassigned, _ = admin.req("POST", "/api/cover/assign", body={
 })
 check("re-assigning the same slot updates in place", s == 200 and reassigned.get("updated") is True, f"{s} {reassigned}")
 
-check("the absent teacher cannot cover their own lesson", admin.req("POST", "/api/cover/assign", body={
+s, own, _ = admin.req("POST", "/api/cover/assign", body={
     "date": monday, "lesson_id": p0["lesson_id"], "day": p0["day"], "idx": p0["idx"],
     "substitute_teacher_id": priya_id,
-})[0] == 400)
+})
+check("the absent teacher cannot cover their own lesson", s == 400, f"{s} {own}")
 check("cover for a lesson not on that timetable is rejected", admin.req("POST", "/api/cover/assign", body={
     "date": monday, "lesson_id": "no-such-lesson", "day": p0["day"], "idx": p0["idx"],
     "substitute_teacher_id": sub["teacher_id"],
@@ -109,9 +117,16 @@ check("cover on a mismatched weekday is rejected", admin.req("POST", "/api/cover
     "substitute_teacher_id": sub["teacher_id"],
 })[0] == 400)
 
-# pick a teacher the API says is busy at that same period, then expect a 409
+# Pick a teacher the API says is busy at this same period, then expect a 409.
+# It must come from p0's own blocked list and not be the substitute we already
+# assigned: re-posting that slot with them would just update it in place (200).
 s, cover2, _ = admin.req("GET", f"/api/cover?date={monday}")
-busy_teacher = next((b["teacher_id"] for p in cover2["periods"] for b in p["blocked"] if b["reason"] == "teaching another class at this time"), None)
+p0_now = next((p for p in cover2["periods"]
+               if p.get("absent_teacher_id") == priya_id and p["lesson_id"] == p0["lesson_id"]
+               and p["idx"] == p0["idx"]), {"blocked": []})
+busy_teacher = next((b["teacher_id"] for b in p0_now["blocked"]
+                     if b["reason"] == "teaching another class at this time"
+                     and b["teacher_id"] not in (sub["teacher_id"], priya_id)), None)
 if busy_teacher:
     s, busy, _ = admin.req("POST", "/api/cover/assign", body={
         "date": monday, "lesson_id": p0["lesson_id"], "day": p0["day"], "idx": p0["idx"],

@@ -19,8 +19,13 @@ const page = await browser.newPage()
 const errors = []
 page.on('pageerror', (e) => errors.push(String(e)))
 const moves = []
+const moveStatuses = []
 page.on('request', (req) => {
   if (req.method() === 'PUT' && req.url().includes('/api/timetable/entries/')) moves.push(req.postData() ?? '')
+})
+page.on('response', (res) => {
+  const req = res.request()
+  if (req.method() === 'PUT' && req.url().includes('/api/timetable/entries/')) moveStatuses.push(res.status())
 })
 
 // ---------------------------------------------------------------- login via UI
@@ -36,25 +41,41 @@ const plan2 = await page.evaluate(async () => {
   const j = async (u) => (await fetch(u, { headers: H })).json()
 
   const tt = await j('/api/timetable')
-  const entries = tt.entries.filter((e) => e.week === 0 && !e.locked)
-  const slots = tt.slots.filter((s) => !s.is_break)
-  const src = entries[0]
-  if (!src) return { src: null }
+  const setup = await j('/api/setup/all')
+  const week0 = tt.entries.filter((e) => e.week === 0)
+  const open = tt.slots.filter((s) => !s.is_break)
 
-  const classBusy = new Set(entries.map((e) => `${e.class_id}|${e.day}|${e.idx}`))
-  const teacherBusy = new Set(entries.map((e) => `${e.teacher_id}|${e.day}|${e.idx}`))
-  const candidates = slots
-    .map((s) => `${s.day}|${s.idx}`)
-    .filter((k) => !classBusy.has(`${src.class_id}|${k}`) && !teacherBusy.has(`${src.teacher_id}|${k}`) && !k.startsWith(`${src.day}|${src.idx}`))
+  const teachers = new Map(setup.teachers.map((t) => [t.id, t]))
+  const unavailable = new Set()
+  for (const t of setup.teachers) for (const u of t.unavailable ?? []) unavailable.add(`${t.id}|${u.day}|${u.idx}`)
+  const classBusy = new Set(week0.map((e) => `${e.class_id}|${e.day}|${e.idx}`))
+  const teacherBusy = new Set(week0.map((e) => `${e.teacher_id}|${e.day}|${e.idx}`))
 
-  return {
-    src,
-    candidates,
-    classId: src.class_id,
-    fromDay: src.day,
-    fromIdx: src.idx,
-    entryId: src.id,
+  // Same rules the API enforces on a move, minus the entry itself, so the test
+  // picks a target the server will accept instead of guessing and eating 409s.
+  const legal = (e, day, idx) => {
+    if (day === e.day && idx === e.idx) return false
+    if (classBusy.has(`${e.class_id}|${day}|${idx}`)) return false
+    if (teacherBusy.has(`${e.teacher_id}|${day}|${idx}`)) return false
+    if (unavailable.has(`${e.teacher_id}|${day}|${idx}`)) return false
+    const sameSubject = week0.some((x) => x.id !== e.id && x.class_id === e.class_id && x.day === day && x.subject_id === e.subject_id)
+    if (sameSubject) return false
+    const t = teachers.get(e.teacher_id)
+    const daily = week0.filter((x) => x.id !== e.id && x.teacher_id === e.teacher_id && x.day === day).length
+    if (t && daily >= t.max_daily) return false
+    return true
   }
+
+  for (const e of week0.filter((x) => !x.locked)) {
+    const candidates = open
+      .map((s) => `${s.day}|${s.idx}`)
+      .filter((k) => legal(e, ...k.split('|').map(Number)))
+      .sort((a, b) => (a.startsWith(`${e.day}|`) ? -1 : 0) - (b.startsWith(`${e.day}|`) ? -1 : 0))
+    if (candidates.length) {
+      return { src: e, candidates, classId: e.class_id, fromDay: e.day, fromIdx: e.idx, entryId: e.id }
+    }
+  }
+  return { src: null }
 })
 if (!plan2 || !plan2.src) {
   console.log('FAIL no unlocked entry found to drag — the demo DB looks empty')
@@ -139,14 +160,16 @@ for (const candidate of plan2.candidates) {
     continue
   }
   try {
-    await waitMoved(candidate, 4000)
+    await waitMoved(candidate, 2500)
     done = { day, idx, attempts }
     break
   } catch {
     // the drop was refused (e.g. a conflict the test cannot predict) — try the next empty slot
   }
+  if (attempts >= 10) break
 }
-check('a drag & drop moves the lesson to an empty legal cell', !!done, `attempted ${attempts} candidate(s) ${attemptLog.join(',')}; src P${plan2.fromIdx}/day${plan2.fromDay}`)
+check('a drag & drop moves the lesson to an empty legal cell', !!done,
+  `attempted ${attempts} candidate(s) ${attemptLog.join(',')}; src P${plan2.fromIdx}/day${plan2.fromDay}; PUT statuses=${moveStatuses.join(',')}`)
 check('each drag attempt sent exactly one move request', moves.length === attempts, `${moves.length} PUT(s) for ${attempts} attempt(s)`)
 if (done) {
   const last = JSON.parse(moves[moves.length - 1] || '{}')
