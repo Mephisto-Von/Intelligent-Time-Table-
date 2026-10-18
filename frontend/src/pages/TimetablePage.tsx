@@ -1,7 +1,15 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, downloadFile } from '../api'
-import type { GenerateReport, Lesson, SetupAll, SlotEntry, TimetableData } from '../api'
+import type {
+  GenerateReport,
+  Lesson,
+  PublicLink,
+  SetupAll,
+  SlotEntry,
+  SolverWeights,
+  TimetableData,
+} from '../api'
 import { useAuth } from '../auth'
 import { Page, PageHead } from '../components/Layout'
 import TimetableGrid from '../components/TimetableGrid'
@@ -33,8 +41,10 @@ export default function TimetablePage() {
   const [week, setWeek] = useState(0)
   const [showGenerate, setShowGenerate] = useState(false)
   const [showReport, setShowReport] = useState<GenerateReport | null>(null)
+  const [prevReport, setPrevReport] = useState<GenerateReport | null>(null)
   const [editEntry, setEditEntry] = useState<SlotEntry | null>(null)
   const [showAdd, setShowAdd] = useState(false)
+  const [showShare, setShowShare] = useState(false)
 
   const timetable = useQuery({
     queryKey: ['timetable'],
@@ -101,6 +111,17 @@ export default function TimetablePage() {
   const conflictHint =
     mode === 'class' ? 'classes' : mode === 'teacher' ? 'teachers' : 'rooms'
 
+  // Export the view the user is actually looking at (entity + cycle week).
+  const exportParams = () => {
+    const params = new URLSearchParams({ entity: mode })
+    const id = groupId || groups[0]?.id
+    if (id) params.set('id', id)
+    if (cycleWeeks > 1) params.set('week', String(week))
+    return params
+  }
+  const exportTarget = groupId || groups[0]?.id
+  const exportName = groups.find((g) => g.id === exportTarget)?.name ?? mode
+
   return (
     <Page>
       <PageHead
@@ -132,7 +153,30 @@ export default function TimetablePage() {
                 </ConfirmButton>
               </>
             )}
-            <Btn onClick={() => downloadFile('/api/export/timetable.csv', 'timetable.csv')}>⬇ CSV</Btn>
+            <Btn
+              onClick={() =>
+                downloadFile(`/api/export/timetable.csv?${exportParams()}`, `timetable-${mode}.csv`)
+              }
+            >
+              ⬇ CSV
+            </Btn>
+            <Btn
+              onClick={() =>
+                downloadFile(`/api/export/timetable.ics?${exportParams()}`, `timetable-${mode}.ics`)
+              }
+            >
+              📆 ICS
+            </Btn>
+            <Btn
+              onClick={() =>
+                downloadFile(`/api/export/timetable.pdf?${exportParams()}`, `timetable-${mode}.pdf`)
+              }
+            >
+              📄 PDF
+            </Btn>
+            {isStaff && exportTarget && (
+              <Btn onClick={() => setShowShare(true)}>🔗 Share</Btn>
+            )}
             <Btn onClick={() => window.print()}>🖨 Print</Btn>
           </div>
         }
@@ -250,6 +294,7 @@ export default function TimetablePage() {
         onClose={() => setShowGenerate(false)}
         onDone={(report) => {
           refresh()
+          setPrevReport((prev) => showReport ?? prev)
           setShowReport(report)
           if (report.unplaced_total === 0) toast(`Timetable generated — all ${report.placed} periods placed`, 'ok')
           else toast(`Generated with ${report.unplaced_total} unplaced periods`, 'err')
@@ -257,7 +302,7 @@ export default function TimetablePage() {
         cycleWeeks={cycleWeeks}
       />
 
-      <ReportModal report={showReport} onClose={() => setShowReport(null)} />
+      <ReportModal report={showReport} previous={prevReport} onClose={() => setShowReport(null)} />
 
       {editEntry && (
         <EntryModal
@@ -281,6 +326,15 @@ export default function TimetablePage() {
           void qc.invalidateQueries({ queryKey: ['setup'] })
         }}
       />
+
+      {showShare && exportTarget && (
+        <ShareModal
+          onClose={() => setShowShare(false)}
+          entity={mode}
+          entityId={exportTarget}
+          entityName={exportName}
+        />
+      )}
     </Page>
   )
 }
@@ -301,12 +355,15 @@ function GenerateModal({
   const [limit, setLimit] = useState(4000)
   const [seed, setSeed] = useState('')
   const [busy, setBusy] = useState(false)
+  const [advanced, setAdvanced] = useState(false)
+  const [weights, setWeights] = useState<SolverWeights>(DEFAULT_WEIGHTS)
 
   const run = async () => {
     setBusy(true)
     try {
       const body: Record<string, unknown> = { time_limit_ms: limit }
       if (seed.trim()) body.seed = Number(seed.trim())
+      if (advanced) body.weights = weights
       const report = await api<GenerateReport>('/api/generate', { body })
       onDone(report)
       onClose()
@@ -340,7 +397,7 @@ function GenerateModal({
           <option value={1000}>Quick — 1 second</option>
           <option value={4000}>Balanced — 4 seconds</option>
           <option value={10000}>Thorough — 10 seconds</option>
-          <option value={25000}>Deep — 25 seconds</option>
+          <option value={20000}>Deep — 20 seconds</option>
         </Select>
       </Field>
       <Field label="Random seed" hint="Leave empty for a fresh solution each run; reuse a seed to reproduce one.">
@@ -351,13 +408,80 @@ function GenerateModal({
           ? `This school uses a ${cycleWeeks}-week timetable cycle — both weeks are generated at once.`
           : 'This school uses a single-week timetable cycle.'}
       </div>
+
+      <div style={{ marginTop: 14, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+        <div className="row tight" style={{ justifyContent: 'space-between' }}>
+          <strong className="small">Scoring balance</strong>
+          <Btn size="sm" variant="ghost" onClick={() => setAdvanced((a) => !a)}>
+            {advanced ? 'Hide advanced' : 'Tune advanced'}
+          </Btn>
+        </div>
+        {advanced && (
+          <div style={{ marginTop: 10 }}>
+            <p className="muted small" style={{ marginBottom: 10 }}>
+              Higher values make the solver care more about that goal. Hard constraints (clashes,
+              limits, rooms) are never traded away.
+            </p>
+            {WEIGHT_FIELDS.map((f) => (
+              <div key={f.key} style={{ marginBottom: 8 }}>
+                <div className="row tight" style={{ justifyContent: 'space-between' }}>
+                  <span className="small">{f.label}</span>
+                  <span className="mono small">{weights[f.key]}</span>
+                </div>
+                <input
+                  type="range"
+                  min={f.min}
+                  max={f.max}
+                  step={f.step}
+                  value={weights[f.key]}
+                  style={{ width: '100%' }}
+                  onChange={(e) =>
+                    setWeights({ ...weights, [f.key]: Number(e.target.value) })
+                  }
+                />
+              </div>
+            ))}
+            <Btn size="sm" onClick={() => setWeights(DEFAULT_WEIGHTS)}>
+              Reset to defaults
+            </Btn>
+          </div>
+        )}
+      </div>
     </Modal>
   )
 }
 
-function ReportModal({ report, onClose }: { report: GenerateReport | null; onClose: () => void }) {
+const DEFAULT_WEIGHTS: SolverWeights = {
+  same_subject_per_day: 4,
+  class_gap: 1.5,
+  teacher_gap: 0.4,
+  teacher_balance: 0.05,
+  week_balance: 0.4,
+  unplaced: 1000,
+}
+
+const WEIGHT_FIELDS: { key: keyof SolverWeights; label: string; min: number; max: number; step: number }[] = [
+  { key: 'class_gap', label: 'Avoid gaps in class days', min: 0, max: 10, step: 0.5 },
+  { key: 'teacher_gap', label: 'Avoid gaps in teacher days', min: 0, max: 5, step: 0.1 },
+  { key: 'same_subject_per_day', label: 'Spread a subject across the week', min: 0, max: 10, step: 0.5 },
+  { key: 'teacher_balance', label: 'Balance teacher load across days', min: 0, max: 1, step: 0.01 },
+  { key: 'week_balance', label: 'Balance across cycle weeks', min: 0, max: 2, step: 0.1 },
+  { key: 'unplaced', label: 'Priority of placing every period', min: 100, max: 2000, step: 100 },
+]
+
+function ReportModal({
+  report,
+  previous,
+  onClose,
+}: {
+  report: GenerateReport | null
+  previous: GenerateReport | null
+  onClose: () => void
+}) {
   if (!report) return null
   const pct = report.requested ? Math.round((report.placed / report.requested) * 100) : 100
+  const delta = previous ? report.placed - previous.placed : 0
+  const scoreDelta = previous ? report.score - previous.score : 0
   return (
     <Modal open onClose={onClose} title="Generation report" footer={<Btn onClick={onClose}>Done</Btn>}>
       <div className="row" style={{ marginBottom: 14, alignItems: 'stretch' }}>
@@ -379,6 +503,19 @@ function ReportModal({ report, onClose }: { report: GenerateReport | null; onClo
           <div className="stat-hint">moves in {report.elapsed_ms} ms</div>
         </div>
       </div>
+
+      {previous && (
+        <div className="row tight" style={{ marginBottom: 12 }}>
+          <Badge tone={delta >= 0 ? 'ok' : 'warn'}>
+            {delta >= 0 ? '+' : ''}
+            {delta} periods vs previous run
+          </Badge>
+          <Badge tone={scoreDelta <= 0 ? 'ok' : 'warn'}>
+            quality {scoreDelta <= 0 ? 'improved' : 'worsened'}
+          </Badge>
+          <span className="small faint">lower quality score is better</span>
+        </div>
+      )}
 
       {report.unplaced.length > 0 ? (
         <>
@@ -600,6 +737,151 @@ function AddEntryModal({
           ? `${lesson.periods_per_week} periods per week planned for ${lesson.class_name}.`
           : 'Hand-placed lessons are automatically locked.'}
       </div>
+    </Modal>
+  )
+}
+
+// ------------------------------------------------------------------ share links
+
+function ShareModal({
+  onClose,
+  entity,
+  entityId,
+  entityName,
+}: {
+  onClose: () => void
+  entity: GridMode
+  entityId: string
+  entityName: string
+}) {
+  const qc = useQueryClient()
+  const links = useQuery({
+    queryKey: ['public-links'],
+    queryFn: () => api<{ items: PublicLink[] }>('/api/public-links'),
+  })
+
+  const refresh = () => void qc.invalidateQueries({ queryKey: ['public-links'] })
+
+  const create = useMutation({
+    mutationFn: () =>
+      api<PublicLink>('/api/public-links', { body: { entity, entity_id: entityId } }),
+    onSuccess: (l) => {
+      refresh()
+      void copy(l)
+    },
+    onError: (e) => toast(errMsg(e), 'err'),
+  })
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api(`/api/public-links/${id}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      refresh()
+      toast('Public link revoked', 'ok')
+    },
+    onError: (e) => toast(errMsg(e), 'err'),
+  })
+
+  async function copy(l: PublicLink) {
+    const full = `${window.location.origin}${l.path}`
+    try {
+      await navigator.clipboard.writeText(full)
+      toast('Public link copied to clipboard', 'ok')
+    } catch {
+      toast(full, 'info')
+    }
+  }
+
+  const items = links.data?.items ?? []
+  const current = items.find((l) => l.entity === entity && l.entity_id === entityId)
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={`Share the ${entity} timetable`}
+      footer={<Btn onClick={onClose}>Done</Btn>}
+    >
+      <p className="muted small" style={{ marginBottom: 12 }}>
+        A public link opens <strong>{entityName}</strong> as a read-only timetable — no sign-in
+        needed. Revoke it any time; the link stops working immediately.
+      </p>
+
+      {links.isLoading ? (
+        <Loading label="Loading links…" />
+      ) : current ? (
+        <div className="list">
+          <div className="list-item">
+            <div className="grow">
+              <div className="title">Public link active</div>
+              <div className="sub mono small">{`${window.location.origin}${current.path}`}</div>
+            </div>
+            <Badge tone="ok">live</Badge>
+          </div>
+          <div className="row">
+            <Btn size="sm" variant="primary" onClick={() => copy(current)}>
+              📋 Copy link
+            </Btn>
+            <a href={current.path} target="_blank" rel="noreferrer">
+              <Btn size="sm">Open</Btn>
+            </a>
+            <ConfirmButton
+              message="Revoke this public link? Anyone using it will lose access."
+              onConfirm={() => remove.mutate(current.id)}
+            >
+              Revoke
+            </ConfirmButton>
+          </div>
+        </div>
+      ) : (
+        <div className="row">
+          <Btn variant="primary" onClick={() => create.mutate()} disabled={create.isPending}>
+            🔗 Create public link
+          </Btn>
+          <span className="small faint">Only staff can create or revoke links.</span>
+        </div>
+      )}
+
+      {items.length > 0 && (
+        <div style={{ marginTop: 18 }}>
+          <h3 style={{ marginBottom: 6 }}>All shared timetables</h3>
+          <div className="table-wrap">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Name</th>
+                  <th>Created</th>
+                  <th style={{ textAlign: 'right' }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((l) => (
+                  <tr key={l.id}>
+                    <td>
+                      <Badge>{l.entity}</Badge>
+                    </td>
+                    <td>{l.entity_name ?? '—'}</td>
+                    <td className="muted small">{new Date(l.created_at).toLocaleDateString()}</td>
+                    <td>
+                      <div className="actions">
+                        <Btn size="sm" onClick={() => copy(l)}>
+                          Copy
+                        </Btn>
+                        <ConfirmButton
+                          message={`Revoke the link for ${l.entity_name ?? l.entity}?`}
+                          onConfirm={() => remove.mutate(l.id)}
+                        >
+                          Revoke
+                        </ConfirmButton>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </Modal>
   )
 }

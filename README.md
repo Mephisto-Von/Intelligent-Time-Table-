@@ -25,8 +25,14 @@ scratch in **Rust (Axum + SQLite)** and **JavaScript (React + TypeScript)**.
   across the whole cycle.
 - **Calendar** — holidays, exam periods and school activities; holidays close the school for
   scheduling and cover.
-- **CSV export and print-ready grids** — export the timetable as CSV or print it straight from
-  the browser.
+- **CSV, PDF and ICS export** — download a timetable as CSV, a print-ready PDF, or a calendar
+  feed (`.ics`) for any class, teacher or room — and print straight from the browser.
+- **Shareable read-only timetables** — mint a public link for a class, teacher or room. No sign-in
+  required; revoke it any time and the link stops working immediately.
+- **Activity log** — every timetable generation, hand-edit, cover assignment, leave decision and
+  account change is recorded with who did it and when.
+- **Notifications** — optional webhook or email (Knock) delivery when a substitute is assigned or
+  leave is requested/decided. Silently no-op when unconfigured.
 
 ![Timetable](docs/screenshots/timetable.png)
 
@@ -35,9 +41,14 @@ scratch in **Rust (Axum + SQLite)** and **JavaScript (React + TypeScript)**.
 ```
 backend/   Rust · Axum 0.8 · sqlx (SQLite) · JWT (HS256) · argon2
   src/solver/       the scheduling engine (pure Rust, unit-tested)
-  src/routes/       REST API: auth, setup, timetable, leave, cover, calendar, school, demo
+  src/routes/       REST API: auth, setup, timetable, leave, cover, calendar, school, demo,
+                    audit, public links, notifications
   src/db.rs         schema + migrations
   src/seed.rs       demo school generator
+  src/pdf.rs        dependency-free PDF writer (unit-tested)
+  src/ical.rs       iCalendar (.ics) generator (unit-tested)
+  src/notifications.rs  webhook / Knock delivery (best-effort)
+  src/audit.rs      activity-log writer
 frontend/  React 19 · TypeScript · Vite · TanStack Query · React Router
   src/pages/        dashboard, timetable, setup, leave, cover, calendar, settings
   src/components/   app shell and the timetable grid (drag & drop)
@@ -98,8 +109,18 @@ teacher login: e.g. david.chen@demo.school / demo1234
 student@demo.school / demo1234        # student in Grade 7A
 ```
 
-Environment variables: `PORT` (default `8080`), `TIMETABLE_DB` (default `data/timetable.db`),
-`TIMETABLE_JWT_SECRET` (a random secret is generated under `data/` on first run).
+Environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `PORT` | HTTP port (default `8080`) |
+| `TIMETABLE_DB` | SQLite path (default `data/timetable.db`) |
+| `TIMETABLE_JWT_SECRET` | JWT signing secret (a random one is generated under `data/` on first run) |
+| `NOTIFY_WEBHOOK_URL` | Optional: POST notification JSON to any webhook |
+| `KNOCK_API_KEY` | Optional: deliver notifications (email/in-app) via [Knock](https://knock.app) |
+
+Notifications are entirely optional — with neither variable set the app runs normally and simply
+skips them.
 
 ### Tests
 
@@ -121,13 +142,17 @@ cd backend && cargo test        # solver unit tests: feasibility, clashes, limit
 | `GET` | `/api/timetable` | slots + placed entries |
 | `POST/PUT/DELETE` | `/api/timetable/entries[/{id}]` | place, move, lock and remove lessons |
 | `POST` | `/api/timetable/clear` | empty the timetable |
-| `GET` | `/api/export/timetable.csv` | CSV export |
+| `GET` | `/api/export/timetable.csv` · `.pdf` · `.ics` | CSV / PDF / calendar export |
 | `GET/POST` | `/api/leave`, `/api/leave/{id}/decide`, `/cancel`, `/impact` | leave workflow |
 | `GET` | `/api/cover?date=` | absences, lessons and ranked substitute candidates |
 | `POST` / `DELETE` | `/api/cover/assign`, `/api/cover/{id}` | assign / cancel a substitute |
 | `GET/POST/PUT/DELETE` | `/api/calendar[/{id}]` | school calendar |
 | `GET/POST/PUT/DELETE` | `/api/users[/{id}]` | staff accounts |
 | `GET` | `/api/dashboard` | coverage stats, gaps, today's absences, upcoming events |
+| `GET` | `/api/audit` | activity log (staff) |
+| `GET/POST` | `/api/public-links`, `DELETE /api/public-links/{id}` | shareable read-only links (staff) |
+| `GET` | `/api/public/timetable/{token}` | anonymous read of a shared timetable |
+| `GET/POST` | `/api/notifications/status`, `/api/notifications/test` | notification config and test send |
 | `POST` | `/api/demo/seed` · `/api/demo/reset` | public demo workspace |
 
 All endpoints are school-scoped from the JWT; write endpoints require the `admin` or
@@ -143,6 +168,7 @@ All endpoints are school-scoped from the JWT; write endpoints require the `admin
 
 - Passwords are argon2 hashes; JWTs are HS256-signed with a per-installation secret.
 - The demo workspace can be rebuilt any time from *Settings → Demo workspace*.
-- Natural next steps: notifications (email/webhooks) for cover assignments, per-teacher
-  timetable export (PDF/ICS), an audit log of timetable changes, and a public read-only
-  timetable endpoint for embedding.
+- Exports and share links target the class, teacher or room you are currently viewing, and honour
+  the selected cycle week.
+- Still open: multi-teacher/team-taught lessons, subject-vs-time-of-day preferences, and an
+  iCal subscription feed (the one-off `.ics` export is already in place).

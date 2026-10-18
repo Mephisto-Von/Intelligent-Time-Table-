@@ -1,8 +1,11 @@
+pub mod audit;
 pub mod auth_routes;
 pub mod calendar;
 pub mod cover;
 pub mod demo;
 pub mod leave;
+pub mod notify;
+pub mod public;
 pub mod school;
 pub mod setup;
 pub mod timetable;
@@ -49,6 +52,15 @@ pub fn api_router() -> Router<AppState> {
         )
         .route("/api/timetable/clear", post(timetable::clear_entries))
         .route("/api/export/timetable.csv", get(timetable::export_csv))
+        .route("/api/export/timetable.ics", get(timetable::export_ics))
+        .route("/api/export/timetable.pdf", get(timetable::export_pdf))
+        // audit + notifications + public links
+        .route("/api/audit", get(audit::list_audit))
+        .route("/api/notifications/status", get(notify::notify_status))
+        .route("/api/notifications/test", post(notify::notify_test))
+        .route("/api/public-links", get(public::list_links).post(public::create_link))
+        .route("/api/public-links/{id}", delete(public::delete_link))
+        .route("/api/public/timetable/{token}", get(public::public_timetable))
         // leave
         .route("/api/leave", get(leave::list_leave).post(leave::create_leave))
         .route("/api/leave/{id}/decide", post(leave::decide_leave))

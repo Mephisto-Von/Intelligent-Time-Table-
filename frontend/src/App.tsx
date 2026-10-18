@@ -10,6 +10,7 @@ import LeavePage from './pages/LeavePage'
 import CoverPage from './pages/CoverPage'
 import CalendarPage from './pages/CalendarPage'
 import SettingsPage from './pages/SettingsPage'
+import PublicTimetablePage from './pages/PublicTimetablePage'
 
 export default function App() {
   const { ready, user, isStaff, isAdmin } = useAuth()
@@ -25,6 +26,8 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
+      {/* Anonymous, read-only shared timetable — no session required. */}
+      <Route path="/public/:token" element={<PublicTimetablePage />} />
       <Route element={user ? <Layout /> : <Navigate to="/login" replace />}>
         <Route index element={<DashboardPage />} />
         <Route path="timetable" element={<TimetablePage />} />

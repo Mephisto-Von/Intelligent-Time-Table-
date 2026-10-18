@@ -94,7 +94,8 @@ function SubjectsTab({ data }: { data: SetupAll }) {
 
   const open = (s?: Subject) => {
     setForm({ name: s?.name ?? '', code: s?.code ?? '', color: s?.color ?? '#4f46e5' })
-    s ? setEditing(s) : setCreating(true)
+    if (s) setEditing(s)
+    else setCreating(true)
   }
 
   const close = () => {
@@ -225,7 +226,8 @@ function TeachersTab({ data }: { data: SetupAll }) {
     })
     setSubjectIds(t?.subject_ids ?? [])
     setUnavailable(new Set((t?.unavailable ?? []).map((u) => `${u.day}|${u.idx}`)))
-    t ? setEditing(t) : setCreating(true)
+    if (t) setEditing(t)
+    else setCreating(true)
   }
 
   const close = () => {
@@ -412,7 +414,8 @@ function TeachersTab({ data }: { data: SetupAll }) {
                       onClick={() =>
                         setUnavailable((prev) => {
                           const next = new Set(prev)
-                          off ? next.delete(key) : next.add(key)
+                          if (off) next.delete(key)
+                          else next.add(key)
                           return next
                         })
                       }
@@ -440,7 +443,8 @@ function ClassesTab({ data }: { data: SetupAll }) {
 
   const open = (c?: SchoolClass) => {
     setForm({ name: c?.name ?? '', grade: c?.grade ?? '', size: c?.size ?? 26 })
-    c ? setEditing(c) : setCreating(true)
+    if (c) setEditing(c)
+    else setCreating(true)
   }
   const close = () => {
     setEditing(null)
@@ -552,7 +556,8 @@ function RoomsTab({ data }: { data: SetupAll }) {
 
   const open = (r?: Room) => {
     setForm({ name: r?.name ?? '', capacity: r?.capacity ?? 30, room_type: r?.room_type ?? 'general' })
-    r ? setEditing(r) : setCreating(true)
+    if (r) setEditing(r)
+    else setCreating(true)
   }
   const close = () => {
     setEditing(null)
@@ -701,7 +706,8 @@ function LessonsTab({ data }: { data: SetupAll }) {
       periods_per_week: l?.periods_per_week ?? 2,
       max_per_day: l?.max_per_day ?? 1,
     })
-    l ? setEditing(l) : setCreating(true)
+    if (l) setEditing(l)
+    else setCreating(true)
   }
   const close = () => {
     setEditing(null)

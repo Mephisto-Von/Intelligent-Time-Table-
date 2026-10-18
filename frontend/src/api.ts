@@ -220,8 +220,18 @@ export interface GenerateReport {
   unplaced_total: number
   iterations: number
   elapsed_ms: number
+  score: number
+  seed: number
+  locked_kept: number
   soft: Record<string, number>
-  unplaced: { class_name: string; subject_name: string; count: number; dominant: string }[]
+  unplaced: {
+    lesson_id: string
+    class_name: string
+    subject_name: string
+    teacher_name: string
+    count: number
+    dominant: string
+  }[]
 }
 
 export interface DashboardData {
@@ -257,16 +267,22 @@ export interface LeaveItem {
 }
 
 export interface LeaveImpact {
-  leave: LeaveItem
+  leave_id: string
+  teacher_id: string
+  part: 'full' | 'am' | 'pm'
   sessions: {
     date: string
+    day: number
     day_name: string
     idx: number
     start_time: string
     end_time: string
-    class_name: string
+    lesson_id: string
     subject_name: string
+    subject_code: string
+    class_name: string
     room_name: string | null
+    substitution: { id: string; substitute_name: string } | null
   }[]
 }
 
@@ -350,6 +366,55 @@ export interface UserRow {
   class_id: string | null
   class_name: string | null
   created_at: string
+}
+
+export interface SolverWeights {
+  same_subject_per_day: number
+  class_gap: number
+  teacher_gap: number
+  teacher_balance: number
+  week_balance: number
+  unplaced: number
+}
+
+export interface AuditItem {
+  id: string
+  actor_id: string | null
+  actor_name: string
+  action: string
+  entity: string
+  entity_id: string | null
+  summary: string
+  created_at: string
+}
+
+export interface PublicLink {
+  id: string
+  entity: 'class' | 'teacher' | 'room'
+  entity_id: string
+  entity_name: string | null
+  label: string
+  token: string
+  path: string
+  created_at: string
+}
+
+export interface PublicTimetable {
+  school_name: string
+  cycle_weeks: number
+  entity: string
+  entity_id: string
+  entity_name: string | null
+  label: string
+  slots: Slot[]
+  entries: SlotEntry[]
+}
+
+export interface NotifyStatus {
+  enabled: boolean
+  channels: string[]
+  available_channels: string[]
+  events: { id: string; label: string }[]
 }
 
 export const ROOM_TYPES = ['general', 'lab', 'computer', 'art', 'music', 'gym', 'library', 'outdoor']

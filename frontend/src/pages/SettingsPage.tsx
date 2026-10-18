@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, setToken } from '../api'
-import type { School, SetupAll, UserRow } from '../api'
+import type { AuditItem, NotifyStatus, School, SetupAll, UserRow } from '../api'
 import { useAuth } from '../auth'
 import { Page, PageHead } from '../components/Layout'
 import {
@@ -31,6 +31,25 @@ export default function SettingsPage() {
 
   const users = useQuery({ queryKey: ['users'], queryFn: () => api<{ items: UserRow[] }>('/api/users') })
   const setup = useQuery({ queryKey: ['setup'], queryFn: () => api<SetupAll>('/api/setup/all') })
+  const audit = useQuery({
+    queryKey: ['audit'],
+    queryFn: () => api<{ items: AuditItem[] }>('/api/audit?limit=50'),
+    enabled: isAdmin,
+  })
+  const notify = useQuery({
+    queryKey: ['notify-status'],
+    queryFn: () => api<NotifyStatus>('/api/notifications/status'),
+    enabled: isAdmin,
+  })
+
+  const testNotify = useMutation({
+    mutationFn: () => api<{ delivered: string[]; enabled: boolean }>('/api/notifications/test', { body: {} }),
+    onSuccess: (d) =>
+      d.enabled && d.delivered.length > 0
+        ? toast(`Test notification sent via ${d.delivered.join(', ')}`, 'ok')
+        : toast('No notification channel is configured yet', 'info'),
+    onError: (e) => toast(errMsg(e), 'err'),
+  })
 
   const saveSchool = useMutation({
     mutationFn: (body: { name: string; cycle_weeks: number }) => api<School>('/api/school', { method: 'PUT', body }),
@@ -201,6 +220,85 @@ export default function SettingsPage() {
               ♻️ Reset demo data
             </ConfirmButton>
           </div>
+        </Card>
+      )}
+
+      {isAdmin && (
+        <Card title="Notifications">
+          <div className="row" style={{ marginBottom: 10 }}>
+            {notify.data?.enabled ? (
+              <Badge tone="ok">enabled</Badge>
+            ) : (
+              <Badge tone="warn">not configured</Badge>
+            )}
+            {(notify.data?.channels ?? []).map((c) => (
+              <Badge key={c} tone="info">
+                {c}
+              </Badge>
+            ))}
+          </div>
+          <p className="small muted" style={{ marginBottom: 10 }}>
+            Notify teachers when they are assigned cover, and staff when leave is requested or
+            decided. Enable a channel by setting <code>NOTIFY_WEBHOOK_URL</code> (any webhook) or{' '}
+            <code>KNOCK_API_KEY</code> (email via Knock) on the server, then restart it.
+          </p>
+          {notify.data && (
+            <div className="row tight" style={{ marginBottom: 10 }}>
+              <span className="small faint">Events:</span>
+              {notify.data.events.map((e) => (
+                <Badge key={e.id}>{e.label}</Badge>
+              ))}
+            </div>
+          )}
+          <Btn
+            size="sm"
+            variant="primary"
+            disabled={testNotify.isPending}
+            onClick={() => testNotify.mutate()}
+          >
+            🔔 Send test notification
+          </Btn>
+        </Card>
+      )}
+
+      {isAdmin && (
+        <Card title="Activity log" tight>
+          {audit.isLoading ? (
+            <Loading label="Loading activity…" />
+          ) : (audit.data?.items.length ?? 0) === 0 ? (
+            <EmptyState
+              icon="🧾"
+              title="No activity yet"
+              desc="Timetable, cover, leave and account changes are recorded here."
+            />
+          ) : (
+            <div className="table-wrap">
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th>When</th>
+                    <th>Who</th>
+                    <th>Action</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {audit.data!.items.map((a) => (
+                    <tr key={a.id}>
+                      <td className="nowrap muted small">
+                        {new Date(a.created_at).toLocaleString()}
+                      </td>
+                      <td>{a.actor_name}</td>
+                      <td>
+                        <Badge tone="info">{a.action}</Badge>
+                      </td>
+                      <td className="small">{a.summary}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Card>
       )}
 

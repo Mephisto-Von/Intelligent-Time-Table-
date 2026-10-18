@@ -159,7 +159,9 @@ export default function TimetableGrid({
                             onDrop={(ev) => {
                               ev.preventDefault()
                               setHover(null)
-                              if (!editable || !cell) return
+                              // Drops are only accepted on empty cells (see onDragOver),
+                              // so bail out when the target already holds a lesson.
+                              if (!editable || cell) return
                               const id = ev.dataTransfer.getData('text/plain') || dragging
                               if (id) onMove?.(id, d, p.idx)
                             }}

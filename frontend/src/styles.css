@@ -1341,3 +1341,40 @@ table.tbl {
     background: white;
   }
 }
+
+/* ---------- public (shared) timetable ---------- */
+
+.public-wrap {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.public-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.public-head .brand {
+  padding: 0;
+  border: 0;
+}
+
+.public-head .brand-name {
+  color: var(--text);
+}
+
+.public-head .brand-sub {
+  color: var(--text-soft);
+}
+
+input[type='range'] {
+  accent-color: var(--primary);
+}

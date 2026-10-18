@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 
+use crate::audit;
 use crate::auth::AuthUser;
 use crate::error::{ApiError, ApiResult};
 use crate::models::{
@@ -282,11 +283,19 @@ pub async fn create_subject(
         .bind(&sid)
         .bind(&user.school_id)
         .bind(input.name.trim())
-        .bind(input.code.trim())
-        .bind(input.color.unwrap_or_else(|| "#6366f1".into()))
-        .bind(now())
-        .execute(&st.pool)
-        .await?;
+        .bind(input.code.trim())    .bind(input.color.unwrap_or_else(|| "#6366f1".into()))
+    .bind(now())
+    .execute(&st.pool)
+    .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "subject.create",
+        "subject",
+        Some(&sid),
+        format!("Added subject {}", input.name.trim()),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(json!({ "id": sid }))))
 }
 
@@ -332,6 +341,15 @@ pub async fn delete_subject(
         .bind(&user.school_id)
         .execute(&st.pool)
         .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "subject.delete",
+        "subject",
+        Some(&sid),
+        "Deleted a subject".to_string(),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -369,6 +387,15 @@ pub async fn create_teacher(
     .await?;
     write_teacher_links(&mut tx, &user.school_id, &tid, &input).await?;
     tx.commit().await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "teacher.create",
+        "teacher",
+        Some(&tid),
+        format!("Added teacher {}", input.name.trim()),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(json!({ "id": tid }))))
 }
 
@@ -470,6 +497,15 @@ pub async fn delete_teacher(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "teacher.delete",
+        "teacher",
+        Some(&tid),
+        "Deleted a teacher".to_string(),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -491,11 +527,19 @@ pub async fn create_class(
         .bind(&cid)
         .bind(&user.school_id)
         .bind(input.name.trim())
-        .bind(input.grade.clone().unwrap_or_default())
-        .bind(input.size.unwrap_or(30).clamp(1, 500))
-        .bind(now())
-        .execute(&st.pool)
-        .await?;
+        .bind(input.grade.clone().unwrap_or_default())    .bind(input.size.unwrap_or(30).clamp(1, 500))
+    .bind(now())
+    .execute(&st.pool)
+    .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "class.create",
+        "class",
+        Some(&cid),
+        format!("Added class {}", input.name.trim()),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(json!({ "id": cid }))))
 }
 
@@ -543,6 +587,15 @@ pub async fn delete_class(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "class.delete",
+        "class",
+        Some(&cid),
+        "Deleted a class".to_string(),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -564,11 +617,19 @@ pub async fn create_room(
         .bind(&rid)
         .bind(&user.school_id)
         .bind(input.name.trim())
-        .bind(input.capacity.unwrap_or(30).clamp(1, 2000))
-        .bind(input.room_type.unwrap_or_else(|| "general".into()))
-        .bind(now())
-        .execute(&st.pool)
-        .await?;
+        .bind(input.capacity.unwrap_or(30).clamp(1, 2000))    .bind(input.room_type.unwrap_or_else(|| "general".into()))
+    .bind(now())
+    .execute(&st.pool)
+    .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "room.create",
+        "room",
+        Some(&rid),
+        format!("Added room {}", input.name.trim()),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(json!({ "id": rid }))))
 }
 
@@ -600,7 +661,7 @@ pub async fn delete_room(
     Path(rid): Path<String>,
 ) -> ApiResult<Json<Value>> {
     user.require_staff()?;
-    let used: i64 = sqlx::query(
+    let used: i64 =    sqlx::query(
         "SELECT (SELECT COUNT(*) FROM lessons WHERE room_id = ? AND school_id = ?) + (SELECT COUNT(*) FROM timetable_entries WHERE room_id = ? AND school_id = ?) AS n",
     )
     .bind(&rid)
@@ -618,6 +679,15 @@ pub async fn delete_room(
         .bind(&user.school_id)
         .execute(&st.pool)
         .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "room.delete",
+        "room",
+        Some(&rid),
+        "Deleted a room".to_string(),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -672,6 +742,15 @@ pub async fn replace_bell_schedule(
         .await?
         .rows_affected();
     tx.commit().await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "bell.update",
+        "bell_schedule",
+        None,
+        format!("Replaced the bell schedule ({} slots); cleared {cleared} timetable entries", input.slots.len()),
+    )
+    .await;
     Ok(Json(json!({ "ok": true, "slots": input.slots.len(), "cleared_entries": cleared })))
 }
 
@@ -742,6 +821,15 @@ pub async fn create_lesson(
     .bind(now())
     .execute(&st.pool)
     .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "lesson.create",
+        "lesson",
+        Some(&lid),
+        format!("Added a lesson ({} periods/week)", input.periods_per_week),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(json!({ "id": lid }))))
 }
 
@@ -783,6 +871,15 @@ pub async fn update_lesson(
     if n == 0 {
         return Err(ApiError::NotFound);
     }
+    audit::record(
+        &st.pool,
+        &user,
+        "lesson.update",
+        "lesson",
+        Some(&lid),
+        format!("Updated a lesson ({} periods/week)", input.periods_per_week),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -800,5 +897,14 @@ pub async fn delete_lesson(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "lesson.delete",
+        "lesson",
+        Some(&lid),
+        "Deleted a lesson".to_string(),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }

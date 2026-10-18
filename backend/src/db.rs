@@ -151,6 +151,28 @@ CREATE TABLE IF NOT EXISTS calendar_events (
   notes TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS audit_log (
+  id TEXT PRIMARY KEY,
+  school_id TEXT NOT NULL,
+  actor_id TEXT,
+  actor_name TEXT NOT NULL,
+  action TEXT NOT NULL,
+  entity TEXT NOT NULL,
+  entity_id TEXT,
+  summary TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_school ON audit_log (school_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS public_links (
+  id TEXT PRIMARY KEY,
+  school_id TEXT NOT NULL,
+  entity TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  token TEXT NOT NULL UNIQUE,
+  label TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  UNIQUE (school_id, entity, entity_id)
+);
 "#;
 
 pub async fn connect(path: &str) -> anyhow::Result<SqlitePool> {
@@ -192,6 +214,8 @@ pub async fn wipe_school_data(pool: &SqlitePool, school_id: &str) -> anyhow::Res
         "substitutions",
         "leave_requests",
         "calendar_events",
+        "audit_log",
+        "public_links",
         "teacher_unavailability",
         "teacher_subjects",
         "lessons",

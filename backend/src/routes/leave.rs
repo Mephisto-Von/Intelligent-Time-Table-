@@ -5,10 +5,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 
+use crate::audit;
 use crate::auth::AuthUser;
 use crate::dates::{date_range, day_of, parse_date, part_covers, week_index};
 use crate::error::{ApiError, ApiResult};
-use crate::models::{day_name, LeaveInput, DecideInput};
+use crate::models::{day_name, DecideInput, LeaveInput};
+use crate::notifications;
 use crate::state::{id, now, AppState};
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +125,36 @@ pub async fn create_leave(
     .bind(now())
     .execute(&st.pool)
     .await?;
+
+    let teacher_name: String = sqlx::query("SELECT name FROM teachers WHERE id = ?")
+        .bind(&teacher_id)
+        .fetch_optional(&st.pool)
+        .await?
+        .map(|r| r.get("name"))
+        .unwrap_or_default();
+    audit::record(
+        &st.pool,
+        &user,
+        "leave.request",
+        "leave",
+        Some(&lid),
+        format!("{teacher_name} requested leave {} → {}", start, end),
+    )
+    .await;
+
+    let staff = notifications::staff_recipients(&st.pool, &user.school_id).await;
+    if !staff.is_empty() {
+        let _ = st
+            .notifier
+            .notify(
+                "leave-requested",
+                &staff,
+                &format!("Leave requested by {teacher_name}"),
+                &format!("{} → {} ({part}).", start, end),
+                json!({ "leave_id": lid, "teacher": teacher_name, "start": start.to_string(), "end": end.to_string(), "part": part }),
+            )
+            .await;
+    }
     Ok((StatusCode::CREATED, Json(json!({ "id": lid }))))
 }
 
@@ -148,6 +180,42 @@ pub async fn decide_leave(
     if n == 0 {
         return Err(ApiError::BadRequest("request not found or already decided".into()));
     }
+
+    let teacher_id: Option<String> = sqlx::query("SELECT teacher_id FROM leave_requests WHERE id = ?")
+        .bind(&lid)
+        .fetch_optional(&st.pool)
+        .await?
+        .map(|r| r.get("teacher_id"));
+    if let Some(tid) = &teacher_id {
+        let teacher_name: String = sqlx::query("SELECT name FROM teachers WHERE id = ?")
+            .bind(tid)
+            .fetch_optional(&st.pool)
+            .await?
+            .map(|r| r.get("name"))
+            .unwrap_or_default();
+        audit::record(
+            &st.pool,
+            &user,
+            "leave.decide",
+            "leave",
+            Some(&lid),
+            format!("Leave for {teacher_name} {status}"),
+        )
+        .await;
+        let recipients = notifications::recipients_for_teacher(&st.pool, &user.school_id, tid).await;
+        if !recipients.is_empty() {
+            let _ = st
+                .notifier
+                .notify(
+                    "leave-decided",
+                    &recipients,
+                    &format!("Your leave was {status}"),
+                    &format!("Your leave request was {status} by {}.", user.name),
+                    json!({ "leave_id": lid, "status": status }),
+                )
+                .await;
+        }
+    }
     Ok(Json(json!({ "ok": true, "status": status })))
 }
 
@@ -171,6 +239,15 @@ pub async fn cancel_leave(
         .bind(&user.school_id)
         .execute(&st.pool)
         .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "leave.cancel",
+        "leave",
+        Some(&lid),
+        "Leave request cancelled".to_string(),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -211,12 +288,17 @@ pub async fn leave_impact(
     .fetch_all(&st.pool)
     .await?;
     let mut day_idxs: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+    let mut slot_times: std::collections::HashMap<(i64, i64), (String, String)> =
+        std::collections::HashMap::new();
     for r in &slot_rows {
+        let day: i64 = r.get("day");
+        let idx: i64 = r.get("idx");
+        slot_times.insert(
+            (day, idx),
+            (r.get::<String, _>("start_time"), r.get::<String, _>("end_time")),
+        );
         if r.get::<i64, _>("is_break") == 0 {
-            day_idxs
-                .entry(r.get::<i64, _>("day"))
-                .or_default()
-                .push(r.get::<i64, _>("idx"));
+            day_idxs.entry(day).or_default().push(idx);
         }
     }
 
@@ -263,6 +345,7 @@ pub async fn leave_impact(
             if !part_covers(&part, idx, am_max) {
                 continue;
             }
+            let (start_time, end_time) = slot_times.get(&(day, idx)).cloned().unwrap_or_default();
             let sub = sqlx::query(
                 "SELECT s.id, t.name AS substitute_name FROM substitutions s JOIN teachers t ON t.id = s.substitute_teacher_id
                  WHERE s.school_id = ? AND s.date = ? AND s.lesson_id = ? AND s.status = 'assigned'",
@@ -277,6 +360,8 @@ pub async fn leave_impact(
                 "day": day,
                 "day_name": day_name(day),
                 "idx": idx,
+                "start_time": start_time,
+                "end_time": end_time,
                 "lesson_id": e.get::<String, _>("lesson_id"),
                 "subject_name": e.get::<String, _>("subject_name"),
                 "subject_code": e.get::<String, _>("subject_code"),

@@ -6,6 +6,7 @@ use axum::Json;
 use serde_json::{json, Value};
 use sqlx::Row;
 
+use crate::audit;
 use crate::auth::{hash_password, AuthUser};
 use crate::dates::{day_of, part_covers, today, week_index};
 use crate::error::{ApiError, ApiResult};
@@ -74,6 +75,20 @@ pub async fn update_school(
             .rows_affected();
     }
     tx.commit().await?;
+    let cleared_note = if cycle != current {
+        "; timetable cleared"
+    } else {
+        ""
+    };
+    audit::record(
+        &st.pool,
+        &user,
+        "school.update",
+        "school",
+        Some(&user.school_id),
+        format!("Updated school settings (cycle {cycle} week(s)){cleared_note}"),
+    )
+    .await;
     Ok(Json(json!({ "ok": true, "cleared_entries": cleared })))
 }
 
@@ -164,6 +179,15 @@ pub async fn create_user(
     .bind(now())
     .execute(&st.pool)
     .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "user.create",
+        "user",
+        Some(&uid),
+        format!("Created {} account for {}", input.role, input.name.trim()),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(json!({ "id": uid }))))
 }
 
@@ -204,6 +228,15 @@ pub async fn update_user(
                 .await?;
         }
     }
+    audit::record(
+        &st.pool,
+        &user,
+        "user.update",
+        "user",
+        Some(&uid),
+        format!("Updated the {} account for {}", input.role, input.name.trim()),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -237,6 +270,15 @@ pub async fn delete_user(
         .bind(&user.account_id)
         .execute(&st.pool)
         .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "user.delete",
+        "user",
+        Some(&uid),
+        "Deleted a staff account".to_string(),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 

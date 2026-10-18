@@ -1,14 +1,18 @@
 use std::collections::HashMap;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
+use chrono::Duration;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
 
+use crate::audit;
 use crate::auth::AuthUser;
+use crate::dates::{day_of, today};
 use crate::error::{ApiError, ApiResult};
 use crate::models::{day_name, EntryInput, EntryPatch, GenerateRequest};
 use crate::solver::{
@@ -349,6 +353,20 @@ pub async fn generate(
         })
         .collect();
 
+    audit::record(
+        &st.pool,
+        &user,
+        "timetable.generate",
+        "timetable",
+        None,
+        format!(
+            "Generated timetable: {} placed, {} unplaced (seed {seed})",
+            output.placed.len(),
+            output.total_unplaced()
+        ),
+    )
+    .await;
+
     Ok(Json(json!({
         "placed": output.placed.len(),
         "requested": requested,
@@ -549,6 +567,83 @@ async fn check_entry_conflicts(
     Ok(conflicts)
 }
 
+/// Chooses a room for an entry at a given slot, mirroring the solver's rules:
+/// a fixed room is mandatory, a required room type must match and fit the class,
+/// otherwise the smallest fitting free room is used (or none at all).
+async fn pick_room_for_entry(
+    pool: &SqlitePool,
+    school_id: &str,
+    lesson_id: &str,
+    week: i64,
+    day: i64,
+    idx: i64,
+    exclude_entry: Option<&str>,
+) -> ApiResult<Option<String>> {
+    let lesson = sqlx::query(
+        "SELECT l.room_id, l.required_room_type, c.size AS class_size
+         FROM lessons l JOIN classes c ON c.id = l.class_id
+         WHERE l.id = ? AND l.school_id = ?",
+    )
+    .bind(lesson_id)
+    .bind(school_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(lesson) = lesson else {
+        return Ok(None);
+    };
+    let fixed: Option<String> = lesson.get("room_id");
+    if let Some(f) = fixed {
+        return Ok(Some(f));
+    }
+    let required: Option<String> = lesson.get("required_room_type");
+    let class_size: i64 = lesson.get("class_size");
+
+    let rooms = sqlx::query("SELECT id, capacity, room_type FROM rooms WHERE school_id = ? ORDER BY capacity")
+        .bind(school_id)
+        .fetch_all(pool)
+        .await?;
+    for r in &rooms {
+        let rid: String = r.get("id");
+        let capacity: i64 = r.get("capacity");
+        let room_type: String = r.get("room_type");
+        if capacity < class_size {
+            continue;
+        }
+        if let Some(t) = &required {
+            if &room_type != t {
+                continue;
+            }
+        }
+        let mut q = String::from(
+            "SELECT COUNT(*) AS n FROM timetable_entries WHERE school_id = ? AND week = ? AND day = ? AND idx = ? AND room_id = ?",
+        );
+        if exclude_entry.is_some() {
+            q.push_str(" AND id != ?");
+        }
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(q))
+            .bind(school_id)
+            .bind(week)
+            .bind(day)
+            .bind(idx)
+            .bind(&rid);
+        if let Some(ex) = exclude_entry {
+            query = query.bind(ex);
+        }
+        let n: i64 = query.fetch_one(pool).await?.get("n");
+        if n == 0 {
+            return Ok(Some(rid));
+        }
+    }
+
+    if required.is_some() {
+        Err(ApiError::Conflict(
+            "no free room of the required type at that time".into(),
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
 fn conflicts_error(conflicts: &[Value]) -> ApiError {
     let messages: Vec<String> = conflicts
         .iter()
@@ -593,6 +688,15 @@ pub async fn create_entry(
     .bind(now())
     .execute(&st.pool)
     .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "timetable.place",
+        "entry",
+        Some(&eid),
+        format!("Placed a lesson at week {} day {} P{}", week + 1, input.day, input.idx),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(json!({ "id": eid }))))
 }
 
@@ -615,8 +719,17 @@ pub async fn update_entry(
     let week = patch.week.unwrap_or(row.get::<i64, _>("week")).clamp(0, 1);
     let day = patch.day.unwrap_or(row.get::<i64, _>("day"));
     let idx = patch.idx.unwrap_or(row.get::<i64, _>("idx"));
+    let slot_changed = week != row.get::<i64, _>("week")
+        || day != row.get::<i64, _>("day")
+        || idx != row.get::<i64, _>("idx");
     let room_id: Option<String> = match patch.room_id {
         Some(inner) => inner,
+        None if slot_changed => {
+            // Re-pick a room for the new slot instead of blindly keeping the old
+            // one, so a hand-move rarely fails just because its room is taken.
+            pick_room_for_entry(&st.pool, &user.school_id, &lesson_id, week, day, idx, Some(&eid))
+                .await?
+        }
         None => row.get::<Option<String>, _>("room_id"),
     };
     let locked = patch.locked.unwrap_or(row.get::<i64, _>("locked") != 0);
@@ -647,6 +760,15 @@ pub async fn update_entry(
     .bind(&user.school_id)
     .execute(&st.pool)
     .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "timetable.move",
+        "entry",
+        Some(&eid),
+        format!("Moved a lesson to week {} day {} P{}{}", week + 1, day, idx, if locked { " (locked)" } else { "" }),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -661,6 +783,15 @@ pub async fn delete_entry(
         .bind(&user.school_id)
         .execute(&st.pool)
         .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "timetable.remove",
+        "entry",
+        Some(&eid),
+        "Removed a lesson from the timetable".to_string(),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -674,6 +805,15 @@ pub async fn clear_entries(
         .execute(&st.pool)
         .await?
         .rows_affected();
+    audit::record(
+        &st.pool,
+        &user,
+        "timetable.clear",
+        "timetable",
+        None,
+        format!("Cleared the timetable ({n} entries)"),
+    )
+    .await;
     Ok(Json(json!({ "ok": true, "cleared": n })))
 }
 
@@ -714,35 +854,47 @@ pub async fn export_csv(
         "room" => "e.room_id",
         _ => "l.class_id",
     };
+    let table = match entity.as_str() {
+        "teacher" => "teachers",
+        "room" => "rooms",
+        _ => "classes",
+    };
+    // Fall back to the first entity when the caller omits the id, so a bare
+    // /api/export/timetable.csv still produces a useful (non-empty) file.
+    let id: String = match q.id.clone().filter(|s| !s.is_empty()) {
+        Some(id) => id,
+        None => sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT id FROM {table} WHERE school_id = ? ORDER BY name LIMIT 1"
+        )))
+        .bind(&user.school_id)
+        .fetch_optional(&st.pool)
+        .await?
+        .map(|r| r.get::<String, _>("id"))
+        .unwrap_or_default(),
+    };
+
     let entries = sqlx::query(sqlx::AssertSqlSafe(format!(
         "{ENTRY_SELECT} WHERE e.school_id = ? AND {filter_col} = ? AND e.week = ? ORDER BY e.day, e.idx"
     )))
     .bind(&user.school_id)
-    .bind(q.id.clone().unwrap_or_default())
+    .bind(&id)
     .bind(week)
     .fetch_all(&st.pool)
     .await?;
 
-    let name = if let Some(id) = &q.id {
-        let table = match entity.as_str() {
-            "teacher" => "teachers",
-            "room" => "rooms",
-            _ => "classes",
-        };
-        sqlx::query(sqlx::AssertSqlSafe(format!("SELECT name FROM {table} WHERE id = ?")))
-            .bind(id)
-            .fetch_optional(&st.pool)
-            .await?
-            .map(|r| r.get::<String, _>("name"))
-            .unwrap_or_else(|| "timetable".to_string())
-    } else {
-        "timetable".to_string()
-    };
+    let name = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT name FROM {table} WHERE id = ?")))
+        .bind(&id)
+        .fetch_optional(&st.pool)
+        .await?
+        .map(|r| r.get::<String, _>("name"))
+        .unwrap_or_else(|| "timetable".to_string());
 
-    let slots = sqlx::query("SELECT day, idx, start_time, end_time FROM time_slots WHERE school_id = ? ORDER BY day, idx")
-        .bind(&user.school_id)
-        .fetch_all(&st.pool)
-        .await?;
+    let slots = sqlx::query(
+        "SELECT day, idx, start_time, end_time, is_break FROM time_slots WHERE school_id = ? ORDER BY day, idx",
+    )
+    .bind(&user.school_id)
+    .fetch_all(&st.pool)
+    .await?;
     let days: Vec<i64> = {
         let mut d: Vec<i64> = slots.iter().map(|r| r.get::<i64, _>("day")).collect();
         d.sort_unstable();
@@ -812,5 +964,266 @@ pub async fn export_csv(
             ),
         ],
         csv,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// ICS / PDF export
+// ---------------------------------------------------------------------------
+
+fn filter_column(entity: &str) -> &'static str {
+    match entity {
+        "teacher" => "l.teacher_id",
+        "room" => "e.room_id",
+        _ => "l.class_id",
+    }
+}
+
+/// Resolves the (id, display name) an export targets, defaulting to the first
+/// entity of the requested kind when no id is given.
+async fn resolve_target(
+    pool: &SqlitePool,
+    school_id: &str,
+    entity: &str,
+    id: Option<String>,
+) -> ApiResult<(String, String)> {
+    let table = match entity {
+        "teacher" => "teachers",
+        "room" => "rooms",
+        _ => "classes",
+    };
+    let id: String = match id.filter(|s| !s.is_empty()) {
+        Some(id) => id,
+        None => sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT id FROM {table} WHERE school_id = ? ORDER BY name LIMIT 1"
+        )))
+        .bind(school_id)
+        .fetch_optional(pool)
+        .await?
+        .map(|r| r.get::<String, _>("id"))
+        .unwrap_or_default(),
+    };
+    let name = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT name FROM {table} WHERE id = ?")))
+        .bind(&id)
+        .fetch_optional(pool)
+        .await?
+        .map(|r| r.get::<String, _>("name"))
+        .unwrap_or_else(|| "timetable".to_string());
+    Ok((id, name))
+}
+
+/// Period times keyed by (day, idx).
+async fn slot_times(
+    pool: &SqlitePool,
+    school_id: &str,
+) -> ApiResult<Vec<(i64, i64, String, String, bool)>> {
+    let rows = sqlx::query(
+        "SELECT day, idx, start_time, end_time, is_break FROM time_slots WHERE school_id = ? ORDER BY day, idx",
+    )
+    .bind(school_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<i64, _>("day"),
+                r.get::<i64, _>("idx"),
+                r.get::<String, _>("start_time"),
+                r.get::<String, _>("end_time"),
+                r.get::<i64, _>("is_break") != 0,
+            )
+        })
+        .collect())
+}
+
+pub async fn export_ics(
+    State(st): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<ExportQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let entity = q.entity.unwrap_or_else(|| "class".to_string());
+    let week = q.week.unwrap_or(0).clamp(0, 1);
+    let occurrences: u32 = 12;
+    let school = sqlx::query("SELECT cycle_weeks FROM schools WHERE id = ?")
+        .bind(&user.school_id)
+        .fetch_one(&st.pool)
+        .await?;
+    let cycle_weeks: i64 = school.get("cycle_weeks");
+    let (id, name) = resolve_target(&st.pool, &user.school_id, &entity, q.id).await?;
+
+    let entries = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "{ENTRY_SELECT} WHERE e.school_id = ? AND {} = ? AND e.week = ? ORDER BY e.day, e.idx",
+        filter_column(&entity)
+    )))
+    .bind(&user.school_id)
+    .bind(&id)
+    .bind(week)
+    .fetch_all(&st.pool)
+    .await?;
+    let times = slot_times(&st.pool, &user.school_id).await?;
+
+    let t = today();
+    let monday = t - Duration::days(day_of(&t) - 1);
+    let interval = cycle_weeks.clamp(1, 2) as u32;
+    let events: Vec<crate::ical::Event> = entries
+        .iter()
+        .map(|e| {
+            let day: i64 = e.get("day");
+            let idx: i64 = e.get("idx");
+            let wk: i64 = e.get("week");
+            let (_, _, start, end, _) = times
+                .iter()
+                .find(|(d, i, _, _, _)| *d == day && *i == idx)
+                .cloned()
+                .unwrap_or((day, idx, String::new(), String::new(), false));
+            let date = monday + Duration::days(wk * 7 + (day - 1));
+            let class_name: String = e.get("class_name");
+            let subject: String = e.get("subject_name");
+            let teacher: String = e.get("teacher_name");
+            crate::ical::Event {
+                uid: format!("{}-{}@timetablemaster", e.get::<String, _>("id"), wk),
+                date,
+                start,
+                end,
+                summary: format!("{subject} · {class_name}"),
+                location: e.get::<Option<String>, _>("room_name"),
+                description: Some(format!("Teacher: {teacher}")),
+            }
+        })
+        .collect();
+
+    let cal = crate::ical::render(
+        &format!("{entity} timetable: {name}"),
+        interval,
+        occurrences,
+        &events,
+    );
+    let filename = format!(
+        "timetable-{}-{}.ics",
+        entity,
+        name.to_lowercase().replace([' ', '/', '\\'], "-")
+    );
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/calendar; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        cal,
+    ))
+}
+
+pub async fn export_pdf(
+    State(st): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<ExportQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let entity = q.entity.unwrap_or_else(|| "class".to_string());
+    let week = q.week.unwrap_or(0).clamp(0, 1);
+    let school = sqlx::query("SELECT name, cycle_weeks FROM schools WHERE id = ?")
+        .bind(&user.school_id)
+        .fetch_one(&st.pool)
+        .await?;
+    let cycle_weeks: i64 = school.get("cycle_weeks");
+    let school_name: String = school.get("name");
+    let (id, name) = resolve_target(&st.pool, &user.school_id, &entity, q.id).await?;
+
+    let entries = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "{ENTRY_SELECT} WHERE e.school_id = ? AND {} = ? AND e.week = ? ORDER BY e.day, e.idx",
+        filter_column(&entity)
+    )))
+    .bind(&user.school_id)
+    .bind(&id)
+    .bind(week)
+    .fetch_all(&st.pool)
+    .await?;
+    let slots = slot_times(&st.pool, &user.school_id).await?;
+
+    let mut days: Vec<i64> = slots.iter().map(|s| s.0).collect();
+    days.sort_unstable();
+    days.dedup();
+    let max_idx = slots.iter().map(|s| s.1).max().unwrap_or(0);
+
+    let mut headers = vec!["Period".to_string(), "Time".to_string()];
+    for d in &days {
+        headers.push(day_name(*d).to_string());
+    }
+    let mut weights = vec![0.45, 0.7];
+    weights.extend(std::iter::repeat_n(1.0, days.len()));
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for idx in 1..=max_idx {
+        let time = slots
+            .iter()
+            .find(|s| s.1 == idx)
+            .map(|s| format!("{} - {}", s.2, s.3))
+            .unwrap_or_default();
+        let is_break = slots
+            .iter()
+            .filter(|s| s.1 == idx)
+            .all(|s| s.4);
+        let mut row = vec![format!("P{idx}"), time];
+        for d in &days {
+            let cell = entries
+                .iter()
+                .find(|e| e.get::<i64, _>("day") == *d && e.get::<i64, _>("idx") == idx)
+                .map(|e| {
+                    let room = e.get::<Option<String>, _>("room_name").unwrap_or_default();
+                    let room_part = if room.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({room})")
+                    };
+                    format!(
+                        "{} - {}{}",
+                        e.get::<String, _>("subject_code"),
+                        e.get::<String, _>("teacher_initials"),
+                        room_part
+                    )
+                })
+                .unwrap_or_else(|| {
+                    if is_break {
+                        "BREAK".to_string()
+                    } else {
+                        String::new()
+                    }
+                });
+            row.push(cell);
+        }
+        rows.push(row);
+    }
+
+    let week_label = if cycle_weeks > 1 {
+        if week == 0 { " — Week A" } else { " — Week B" }
+    } else {
+        ""
+    };
+    let meta = format!("{school_name} · {entity} timetable: {name}{week_label}");
+    let bytes = crate::pdf::render(&crate::pdf::Table {
+        title: format!("Timetable — {name}"),
+        meta,
+        headers,
+        rows,
+        weights,
+    });
+    let filename = format!(
+        "timetable-{}-{}.pdf",
+        entity,
+        name.to_lowercase().replace([' ', '/', '\\'], "-")
+    );
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/pdf".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        Bytes::from(bytes),
     ))
 }

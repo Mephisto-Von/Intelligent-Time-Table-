@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 
+use crate::audit;
 use crate::auth::AuthUser;
 use crate::dates::parse_date;
 use crate::error::{ApiError, ApiResult};
@@ -57,8 +58,10 @@ fn validate_event(input: &EventInput) -> ApiResult<(String, String, String)> {
         return Err(ApiError::BadRequest("end date must be on or after start date".into()));
     }
     let kind = input.kind.clone().unwrap_or_else(|| "event".into());
-    if !["holiday", "exam", "event", "activity"].contains(&kind.as_str()) {
-        return Err(ApiError::BadRequest("kind must be holiday, exam, event or activity".into()));
+    if !["holiday", "exam", "event", "activity", "other"].contains(&kind.as_str()) {
+        return Err(ApiError::BadRequest(
+            "kind must be holiday, exam, event, activity or other".into(),
+        ));
     }
     Ok((start.to_string(), end.to_string(), kind))
 }
@@ -79,11 +82,20 @@ pub async fn create_event(
     .bind(input.title.trim())
     .bind(start)
     .bind(end)
-    .bind(kind)
+    .bind(&kind)
     .bind(input.notes.clone().unwrap_or_default())
     .bind(now())
     .execute(&st.pool)
     .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "calendar.create",
+        "calendar",
+        Some(&eid),
+        format!("Added calendar {kind}: {}", input.title.trim()),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(json!({ "id": eid }))))
 }
 
@@ -101,7 +113,7 @@ pub async fn update_event(
     .bind(input.title.trim())
     .bind(start)
     .bind(end)
-    .bind(kind)
+    .bind(&kind)
     .bind(input.notes.clone().unwrap_or_default())
     .bind(&eid)
     .bind(&user.school_id)
@@ -111,6 +123,15 @@ pub async fn update_event(
     if n == 0 {
         return Err(ApiError::NotFound);
     }
+    audit::record(
+        &st.pool,
+        &user,
+        "calendar.update",
+        "calendar",
+        Some(&eid),
+        format!("Updated calendar {kind}: {}", input.title.trim()),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -125,5 +146,14 @@ pub async fn delete_event(
         .bind(&user.school_id)
         .execute(&st.pool)
         .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "calendar.delete",
+        "calendar",
+        Some(&eid),
+        "Deleted a calendar event".to_string(),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }

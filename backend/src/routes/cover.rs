@@ -7,9 +7,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 
+use crate::audit;
 use crate::auth::AuthUser;
 use crate::dates::{day_of, parse_date, part_covers, today, week_index};
 use crate::error::{ApiError, ApiResult};
+use crate::notifications;
 use crate::models::{day_name, CoverAssignInput};
 use crate::state::{id, now, AppState};
 
@@ -173,7 +175,8 @@ pub async fn cover_day(
         .await?;
 
         let sub_rows = sqlx::query(
-            "SELECT s.id, s.lesson_id, s.substitute_teacher_id, t.name AS substitute_name
+            "SELECT s.id, s.lesson_id, s.substitute_teacher_id, t.name AS substitute_name,
+                    t.initials AS substitute_initials
              FROM substitutions s JOIN teachers t ON t.id = s.substitute_teacher_id
              WHERE s.school_id = ? AND s.date = ? AND s.status = 'assigned'",
         )
@@ -181,11 +184,16 @@ pub async fn cover_day(
         .bind(&dstr)
         .fetch_all(&st.pool)
         .await?;
-        let mut sub_map: HashMap<String, (String, String)> = HashMap::new();
+        let mut sub_map: HashMap<String, (String, String, String, String)> = HashMap::new();
         for r in &sub_rows {
             sub_map.insert(
                 r.get::<String, _>("lesson_id"),
-                (r.get::<String, _>("id"), r.get::<String, _>("substitute_name")),
+                (
+                    r.get::<String, _>("id"),
+                    r.get::<String, _>("substitute_teacher_id"),
+                    r.get::<String, _>("substitute_name"),
+                    r.get::<String, _>("substitute_initials"),
+                ),
             );
         }
 
@@ -311,8 +319,13 @@ pub async fn cover_day(
             });
             eligible.truncate(10);
 
-            let substitution = sub_map.get(&lesson_id).map(|(sid, name)| {
-                json!({ "id": sid, "substitute_name": name })
+            let substitution = sub_map.get(&lesson_id).map(|(sid, tid, name, initials)| {
+                json!({
+                    "id": sid,
+                    "substitute_teacher_id": tid,
+                    "substitute_name": name,
+                    "substitute_initials": initials,
+                })
             });
 
             periods.push(json!({
@@ -451,7 +464,7 @@ pub async fn assign_cover(
         .fetch_optional(&st.pool)
         .await?;
     let ts = now();
-    if let Some(e) = existing {
+    let (sid, updated) = if let Some(e) = existing {
         let sid: String = e.get("id");
         sqlx::query(
             "UPDATE substitutions SET substitute_teacher_id = ?, original_teacher_id = ?, status = 'assigned', created_at = ? WHERE id = ?",
@@ -462,24 +475,63 @@ pub async fn assign_cover(
         .bind(&sid)
         .execute(&st.pool)
         .await?;
-        return Ok((StatusCode::OK, Json(json!({ "id": sid, "updated": true }))));
-    }
-    let sid = id();
-    sqlx::query(
-        "INSERT INTO substitutions (id, school_id, date, day, idx, lesson_id, original_teacher_id, substitute_teacher_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'assigned', ?)",
+        (sid, true)
+    } else {
+        let sid = id();
+        sqlx::query(
+            "INSERT INTO substitutions (id, school_id, date, day, idx, lesson_id, original_teacher_id, substitute_teacher_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'assigned', ?)",
+        )
+        .bind(&sid)
+        .bind(&user.school_id)
+        .bind(&dstr)
+        .bind(input.day)
+        .bind(input.idx)
+        .bind(&input.lesson_id)
+        .bind(&original_teacher)
+        .bind(&input.substitute_teacher_id)
+        .bind(&ts)
+        .execute(&st.pool)
+        .await?;
+        (sid, false)
+    };
+
+    let sub_name: String = sqlx::query("SELECT name FROM teachers WHERE id = ?")
+        .bind(&input.substitute_teacher_id)
+        .fetch_optional(&st.pool)
+        .await?
+        .map(|r| r.get("name"))
+        .unwrap_or_default();
+    audit::record(
+        &st.pool,
+        &user,
+        "cover.assign",
+        "substitution",
+        Some(&sid),
+        format!("Cover on {dstr} P{} assigned to {sub_name}", input.idx),
     )
-    .bind(&sid)
-    .bind(&user.school_id)
-    .bind(&dstr)
-    .bind(input.day)
-    .bind(input.idx)
-    .bind(&input.lesson_id)
-    .bind(&original_teacher)
-    .bind(&input.substitute_teacher_id)
-    .bind(&ts)
-    .execute(&st.pool)
-    .await?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": sid }))))
+    .await;
+
+    let mut recipients =
+        notifications::recipients_for_teacher(&st.pool, &user.school_id, &input.substitute_teacher_id)
+            .await;
+    recipients.extend(
+        notifications::recipients_for_teacher(&st.pool, &user.school_id, &original_teacher).await,
+    );
+    if !recipients.is_empty() {
+        let _ = st
+            .notifier
+            .notify(
+                "cover-assigned",
+                &recipients,
+                &format!("Cover assigned for {dstr}"),
+                &format!("P{} is now covered by {sub_name}.", input.idx),
+                json!({ "date": dstr, "idx": input.idx, "lesson_id": input.lesson_id, "substitute": sub_name }),
+            )
+            .await;
+    }
+
+    let status = if updated { StatusCode::OK } else { StatusCode::CREATED };
+    Ok((status, Json(json!({ "id": sid, "updated": updated, "notified": recipients.len() }))))
 }
 
 pub async fn cancel_cover(
@@ -493,6 +545,15 @@ pub async fn cancel_cover(
         .bind(&user.school_id)
         .execute(&st.pool)
         .await?;
+    audit::record(
+        &st.pool,
+        &user,
+        "cover.cancel",
+        "substitution",
+        Some(&sid),
+        "Substitution cancelled".to_string(),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -513,7 +574,7 @@ pub async fn cover_history(
     let from = q.from.unwrap_or_else(|| "2000-01-01".to_string());
     let to = q.to.unwrap_or_else(|| "2100-01-01".to_string());
     let rows = sqlx::query(
-        "SELECT s.id, s.date, s.day, s.idx, s.status,
+        "SELECT s.id, s.date, s.day, s.idx, s.status, s.substitute_teacher_id, s.created_at,
                 ot.name AS original_name, st2.name AS substitute_name,
                 sub.name AS subject_name, sub.code AS subject_code, c.name AS class_name
          FROM substitutions s
@@ -539,8 +600,10 @@ pub async fn cover_history(
                 "day": r.get::<i64, _>("day"),
                 "idx": r.get::<i64, _>("idx"),
                 "status": r.get::<String, _>("status"),
-                "original_name": r.get::<Option<String>, _>("original_name").unwrap_or_else(|| "(removed)".into()),
+                "absent_teacher_name": r.get::<Option<String>, _>("original_name").unwrap_or_else(|| "(removed)".into()),
+                "substitute_teacher_id": r.get::<String, _>("substitute_teacher_id"),
                 "substitute_name": r.get::<Option<String>, _>("substitute_name").unwrap_or_else(|| "(removed)".into()),
+                "created_at": r.get::<String, _>("created_at"),
                 "subject_name": r.get::<Option<String>, _>("subject_name"),
                 "subject_code": r.get::<Option<String>, _>("subject_code"),
                 "class_name": r.get::<Option<String>, _>("class_name"),

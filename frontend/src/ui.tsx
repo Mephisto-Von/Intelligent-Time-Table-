@@ -78,7 +78,7 @@ let pushToast: ((t: ToastItem) => void) | null = null
 let nextToastId = 1
 
 export function toast(msg: string, kind: ToastKind = 'info') {
-  pushToast?.({ id: nextToastId++, kind, msg })
+  if (pushToast) pushToast({ id: nextToastId++, kind, msg })
 }
 
 export function Toaster() {

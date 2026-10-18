@@ -1,8 +1,12 @@
+mod audit;
 mod auth;
 mod dates;
 mod db;
 mod error;
+mod ical;
 mod models;
+mod notifications;
+mod pdf;
 mod routes;
 mod seed;
 mod solver;
@@ -32,7 +36,17 @@ async fn main() -> anyhow::Result<()> {
     let db_path = std::env::var("TIMETABLE_DB").unwrap_or_else(|_| "data/timetable.db".to_string());
     let pool = db::connect(&db_path).await?;
     let jwt_secret = load_or_create_secret()?;
-    let state = AppState { pool, jwt_secret: Arc::new(jwt_secret) };
+    let notifier = notifications::Notifier::from_env();
+    if notifier.enabled() {
+        tracing::info!("notifications enabled via: {}", notifier.channels().join(", "));
+    } else {
+        tracing::info!("notifications disabled (set NOTIFY_WEBHOOK_URL or KNOCK_API_KEY to enable)");
+    }
+    let state = AppState {
+        pool,
+        jwt_secret: Arc::new(jwt_secret),
+        notifier: Arc::new(notifier),
+    };
 
     if seed_demo_flag {
         match seed::ensure_demo_account(&state).await {
