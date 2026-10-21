@@ -421,8 +421,13 @@ pub async fn seed_demo(st: &AppState, account_id: &str, school_id: &str) -> anyh
         rooms: solver_rooms,
         weights: Weights::default(),
         seed: 20260214,
-        time_limit_ms: 4000,
-        iterations: None,
+        // Fixed iteration count instead of a wall-clock budget: the annealing
+        // loop with `iterations: None` stops after `time_limit_ms` of real time,
+        // so every machine (and every CI run) seeded a *different* demo
+        // timetable. Black-box suites that predict the server's conflict rules
+        // then saw different data than the ones that passed locally.
+        time_limit_ms: 0,
+        iterations: Some(1_000_000),
     };
     let requested: usize = seeds.iter().map(|LessonSeed(_, _, _, p, _, _)| *p as usize).sum();
     let output = tokio::task::spawn_blocking(move || solver::run(&input))

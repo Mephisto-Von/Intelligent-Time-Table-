@@ -50,6 +50,10 @@ const plan2 = await page.evaluate(async () => {
   for (const t of setup.teachers) for (const u of t.unavailable ?? []) unavailable.add(`${t.id}|${u.day}|${u.idx}`)
   const classBusy = new Set(week0.map((e) => `${e.class_id}|${e.day}|${e.idx}`))
   const teacherBusy = new Set(week0.map((e) => `${e.teacher_id}|${e.day}|${e.idx}`))
+  const roomBusy = new Set(week0.filter((e) => e.room_id).map((e) => `${e.room_id}|${e.day}|${e.idx}`))
+  const lessonsById = new Map(setup.lessons.map((l) => [l.id, l]))
+  const classesById = new Map(setup.classes.map((c) => [c.id, c]))
+  const rooms = setup.rooms ?? []
 
   // Same rules the API enforces on a move, minus the entry itself, so the test
   // picks a target the server will accept instead of guessing and eating 409s.
@@ -63,6 +67,20 @@ const plan2 = await page.evaluate(async () => {
     const t = teachers.get(e.teacher_id)
     const daily = week0.filter((x) => x.id !== e.id && x.teacher_id === e.teacher_id && x.day === day).length
     if (t && daily >= t.max_daily) return false
+    // On a slot change the server re-picks the room instead of keeping the old
+    // one, so the move is refused when the lesson's fixed room is occupied at
+    // the target or no room of the required type with room for the class is
+    // free there ("no free room of the required type at that time").
+    const lesson = lessonsById.get(e.lesson_id)
+    const klass = classesById.get(e.class_id)
+    const free = (r) => !roomBusy.has(`${r.id}|${day}|${idx}`)
+    const fixed = lesson?.room_id ? rooms.find((r) => r.id === lesson.room_id) : null
+    if (fixed) {
+      if (!free(fixed)) return false
+    } else if (lesson?.required_room_type
+      && !rooms.some((r) => r.capacity >= klass.size && r.room_type === lesson.required_room_type && free(r))) {
+      return false
+    }
     return true
   }
 

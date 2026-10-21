@@ -41,6 +41,10 @@ Nothing outside `$TMPDIR` is touched — the real `data/timetable.db` and
 `jwt_secret.txt` are never used (the DB path and `TIMETABLE_JWT_SECRET` are
 both overridden).
 
+The demo seed is deterministic (fixed solver seed and iteration count, not a
+wall-clock budget), so every run — locally and in CI — sees the same timetable
+and suites that predict the server's conflict rules behave identically everywhere.
+
 ## Layout
 
 | Path | What it covers |
